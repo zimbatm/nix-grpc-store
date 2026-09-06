@@ -43,6 +43,7 @@
 #include <nix/util/serialise.hh>
 #include <nix/util/strings.hh>
 #include <nix/util/types.hh>
+#include <nix/util/signals.hh>
 #include <nix/util/util.hh>
 #include <openssl/bio.h>
 #include <openssl/crypto.h>
@@ -645,6 +646,9 @@ public:
                             std::optional<BuildResult> & res) -> grpc::Status {
       grpc::ClientContext ctx;
       addHeaders(ctx, headers);
+      // ^C cancels the stream so the worker stops the build now instead of
+      // when the process exits.
+      auto const onInterrupt = createInterruptCallback([&ctx]() -> void { ctx.TryCancel(); });
       auto reader = stub->BuildDerivation(&ctx, request);
 
       PathInfoMap infos;
@@ -783,8 +787,13 @@ public:
         return nixcompat::failed(FailureStatus::DependencyFailed,
                                  fmt("dependency '%s' failed", job.failedInput->to_string()));
       }
+      if (isInterrupted()) {
+        return nixcompat::failed(FailureStatus::MiscFailure, "interrupted");
+      }
       try {
         return buildDerivationNative(job.drvPath, job.drv, buildMode, &evalStore);
+      } catch (Interrupted &) {
+        return nixcompat::failed(FailureStatus::MiscFailure, "interrupted");
       } catch (Error & err) {
         return nixcompat::failed(FailureStatus::MiscFailure, err.msg());
       } catch (std::exception & err) {
@@ -823,6 +832,7 @@ public:
           thread = std::jthread(worker);
         }
       }
+      checkInterrupt();
 
       std::vector<KeyedBuildResult> results;
       results.reserve(reqs.size());
