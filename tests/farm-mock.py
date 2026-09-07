@@ -27,6 +27,7 @@ class State:
         self.cv = threading.Condition(self.lock)
         self.next_token = 1
         self.claims: dict[str, int] = {}  # key -> token
+        self.beat: dict[str, float] = {}  # key -> last heartbeat
         self.built: set[str] = set()
         self.failed: dict[str, str] = {}  # key -> kind, one-shot for current waiters
         self.drop: set[str] = set()  # keys whose holder stream should be cut
@@ -154,11 +155,14 @@ class Http(BaseHTTPRequestHandler):
                         st: dict[str, Any] | None = {"status": "built"}
                     elif k in S.failed:
                         st = {"status": "failed", "kind": S.failed.pop(k)}
-                    elif k not in S.claims or S.claims[k] == req.get("token"):
-                        tok = S.claims.get(k) or S.next_token
-                        if k not in S.claims:
+                    elif k not in S.claims or S.claims[k] == req.get("token") or time.monotonic() - S.beat[k] > 3 * HB:
+                        if k in S.claims and S.claims[k] == req.get("token"):
+                            tok = S.claims[k]
+                        else:
+                            tok = S.next_token
                             S.next_token += 1
-                            S.claims[k] = tok
+                        S.claims[k] = tok
+                        S.beat[k] = time.monotonic()
                         st = {"status": "build", "token": tok}
                     else:
                         st = None
@@ -184,11 +188,13 @@ class Http(BaseHTTPRequestHandler):
             self.close_connection = True
 
     def hold(self, k: str, token: int) -> None:
-        """Heartbeat until the client goes away, the claim is released, or the test drops us."""
+        """Heartbeat until the client goes away, the claim is released, or the test drops us.
+        Like niks3, a dropped stream leaves the row to go stale."""
         while True:
             with S.lock:
                 if S.claims.get(k) != token:
                     return
+                S.beat[k] = time.monotonic()
                 if k in S.drop or S.frozen:
                     S.drop.discard(k)
                     S.log.append({"ev": "dropped", "token": token})
@@ -201,11 +207,6 @@ class Http(BaseHTTPRequestHandler):
                 self.send_line({"status": "hb"})
             except OSError:
                 break
-        with S.lock:
-            if S.claims.get(k) == token:
-                del S.claims[k]
-                S.log.append({"ev": "released_by_disconnect", "token": token})
-                S.cv.notify_all()
 
 
 class Hook(socketserver.StreamRequestHandler):
