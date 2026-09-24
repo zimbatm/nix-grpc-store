@@ -41,6 +41,11 @@ class Metrics
              .Name("nix_grpc_phase_seconds")
              .Help("Wall time of one phase of an RPC, by method and phase")
              .Register(*registry);
+    prometheus::Family<prometheus::Histogram> * queueSeconds =
+        &prometheus::BuildHistogram()
+             .Name("nix_grpc_queue_seconds")
+             .Help("Wall time a derivation waited for a worker, by system")
+             .Register(*registry);
     prometheus::Family<prometheus::Gauge> * inflight =
         &prometheus::BuildGauge()
              .Name("nix_grpc_inflight")
@@ -166,6 +171,12 @@ public:
     void schedQueued(size_t count) const
     {
         schedQueuedGauge->Set(static_cast<double>(count));
+    }
+    // how long the scheduler made a derivation wait, so `queued` says how
+    // many and this says how bad
+    void queueWait(std::string_view system, double seconds)
+    {
+        queueSeconds->Add({{"system", std::string(system)}}, buckets).Observe(seconds);
     }
     [[nodiscard]] auto schedQueuedNow() const -> double
     {
