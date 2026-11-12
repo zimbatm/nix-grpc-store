@@ -389,7 +389,10 @@ def test_spire_helper_fetches_the_svid_before_the_daemon_and_renews_it() -> None
         assert arg in args
 
     agent = named(spec["volumes"], "spire-agent-socket")
-    assert dig(agent, "hostPath", "path") == "/run/spire/agent/public/api.sock"
+    assert dig(agent, "hostPath") == {
+        "path": "/run/spire/agent/public",
+        "type": "Directory",
+    }
     assert named(spec["volumes"], "niks3-token") is None
     assert named(spec["volumes"], "tls") is None
 
