@@ -34,6 +34,10 @@ in
         assertion = cfg.idleTimeout == null;
         message = "services.nix-grpc-daemon.idleTimeout needs socket activation, which launchd does not provide";
       }
+      {
+        assertion = cfg.spire.agentSocket == null;
+        message = "services.nix-grpc-daemon.spire has no launchd job yet; point tls.certFile, keyFile and clientCaFile at files spiffe-helper writes";
+      }
     ];
 
     users.knownGroups = [ "nix-grpc-daemon" ];
