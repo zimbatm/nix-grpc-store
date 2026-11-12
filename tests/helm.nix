@@ -339,7 +339,7 @@ pkgs.runCommand "nix-grpc-farm-helm-check"
              --scheduler=farm.example.com:50051 '--trusted-proxy=spiffe://example.org/farm/lb/*'; do
       sargs | grep -xF -- "$a" > /dev/null
     done
-    test "$(sd '.spec.template.spec.volumes[] | select(.name == "spire-agent-socket") | .hostPath.path')" = /run/spire/agent/public/api.sock
+    test "$(sd '.spec.template.spec.volumes[] | select(.name == "spire-agent-socket") | .hostPath.path')" = /run/spire/agent/public
     test -z "$(sd '.spec.template.spec.volumes[] | select(.name == "niks3-token") | .name')"
     test -z "$(sd '.spec.template.spec.volumes[] | select(.name == "tls") | .name')"
     pick ConfigMap t-nix-grpc-farm-worker-x86-spiffe-helper '.data."helper.conf"' spire.yaml | grep -x 'jwt_svids = \[{jwt_audience = "http://niks3", jwt_svid_file_name = "niks3-token"}\]' > /dev/null

@@ -109,7 +109,7 @@ app.kubernetes.io/component: scheduler
 
 {{/* spiffe-helper config for the worker pods; "daemon" false fetches once (the init container). */}}
 {{- define "farm.spiffeHelperConf" -}}
-agent_address = "/run/spire/agent.sock"
+agent_address = "/run/spire/agent/{{ base .root.Values.tls.worker.spire.agentSocket }}"
 cert_dir = "/svid"
 svid_file_name = "svid.pem"
 svid_key_file_name = "svid.key"
@@ -132,7 +132,7 @@ capabilities: {drop: [ALL]}
 
 {{- define "farm.spiffeHelperMounts" -}}
 - {name: svid, mountPath: /svid}
-- {name: spire-agent-socket, mountPath: /run/spire/agent.sock}
+- {name: spire-agent-socket, mountPath: /run/spire/agent, readOnly: true}
 - {name: spiffe-helper, mountPath: /etc/spiffe-helper, readOnly: true}
 {{- end }}
 

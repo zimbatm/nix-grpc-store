@@ -409,7 +409,8 @@ spec:
         {{- end }}
         {{- if $spire.agentSocket }}
         - name: spire-agent-socket
-          hostPath: {path: {{ $spire.agentSocket }}, type: Socket}
+          # the directory, not the socket: an agent restart replaces the file
+          hostPath: {path: {{ dir $spire.agentSocket }}, type: Directory}
         - name: svid
           emptyDir: {medium: Memory}
         - name: spiffe-helper
