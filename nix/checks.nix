@@ -147,6 +147,11 @@ lib.filterAttrs (name: _: lib.hasPrefix "plugin-" name) packages
     module = nixosModule;
   };
 
+  lb-spire = import ../tests/lb-spire.nix {
+    inherit pkgs;
+    lbModule = ../nixos/lb.nix;
+  };
+
   farm = import ../tests/farm.nix {
     e2eTests = pkgs.callPackage ../tests/e2e { };
     inherit pkgs niks3;
