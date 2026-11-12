@@ -49,37 +49,94 @@ let
     };
   caSds = name: caFile: sds name (builtins.dirOf (toString caFile)) { validation_context.trusted_ca = file caFile; };
 
-  upstreamTls = lib.optionalAttrs (cfg.tls.upstream.certFile != null) {
-    transport_socket = {
-      name = "envoy.transport_sockets.tls";
-      typed_config = {
-        "@type" = "type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext";
-        common_tls_context = {
-          alpn_protocols = [ "h2" ];
-          tls_certificate_sds_secret_configs = [
-            (certSds "lb" cfg.tls.upstream.certFile cfg.tls.upstream.keyFile)
-          ];
-        }
-        // (
-          if cfg.tls.upstream.sni == null then
-            { validation_context_sds_secret_config = caSds "ca" cfg.tls.upstream.caFile; }
-          else
-            {
+  # Secrets from the SPIRE agent, under the names it serves them: `default`
+  # is this node's SVID, `ROOTCA` the bundle of its own trust domain, `ALL`
+  # a validation context that checks a chain against the bundle of the
+  # trust domain in its SPIFFE ID, federated domains included.
+  spire = cfg.tls.spire;
+  spireSds = name: {
+    inherit name;
+    sds_config = {
+      resource_api_version = "V3";
+      # Without it envoy opens no listener until the agent answers, and a
+      # SPIRE outage at boot would take the balancer down with it.
+      initial_fetch_timeout = "15s";
+      api_config_source = {
+        api_type = "GRPC";
+        transport_api_version = "V3";
+        grpc_services = [ { envoy_grpc.cluster_name = "spire_agent"; } ];
+      };
+    };
+  };
+  spireAgentCluster = {
+    name = "spire_agent";
+    type = "STATIC";
+    connect_timeout = "1s";
+    typed_extension_protocol_options."envoy.extensions.upstreams.http.v3.HttpProtocolOptions" = {
+      "@type" = "type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions";
+      explicit_http_config.http2_protocol_options = { };
+    };
+    load_assignment = {
+      cluster_name = "spire_agent";
+      endpoints = [ { lb_endpoints = [ { endpoint.address.pipe.path = toString spire.agentSocket; } ]; } ];
+    };
+  };
+
+  upstreamTls =
+    if spire.upstream != null then
+      {
+        transport_socket = {
+          name = "envoy.transport_sockets.tls";
+          typed_config = {
+            "@type" = "type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext";
+            common_tls_context = {
+              alpn_protocols = [ "h2" ];
+              tls_certificate_sds_secret_configs = [ (spireSds "default") ];
               combined_validation_context = {
                 default_validation_context.match_typed_subject_alt_names = [
                   {
-                    san_type = "DNS";
-                    matcher.exact = cfg.tls.upstream.sni;
+                    san_type = "URI";
+                    matcher.prefix = spire.upstream;
                   }
                 ];
-                validation_context_sds_secret_config = caSds "ca" cfg.tls.upstream.caFile;
+                validation_context_sds_secret_config = spireSds "ROOTCA";
               };
-            }
-        );
+            };
+          };
+        };
       }
-      // lib.optionalAttrs (cfg.tls.upstream.sni != null) { inherit (cfg.tls.upstream) sni; };
-    };
-  };
+    else
+      lib.optionalAttrs (cfg.tls.upstream.certFile != null) {
+        transport_socket = {
+          name = "envoy.transport_sockets.tls";
+          typed_config = {
+            "@type" = "type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext";
+            common_tls_context = {
+              alpn_protocols = [ "h2" ];
+              tls_certificate_sds_secret_configs = [
+                (certSds "lb" cfg.tls.upstream.certFile cfg.tls.upstream.keyFile)
+              ];
+            }
+            // (
+              if cfg.tls.upstream.sni == null then
+                { validation_context_sds_secret_config = caSds "ca" cfg.tls.upstream.caFile; }
+              else
+                {
+                  combined_validation_context = {
+                    default_validation_context.match_typed_subject_alt_names = [
+                      {
+                        san_type = "DNS";
+                        matcher.exact = cfg.tls.upstream.sni;
+                      }
+                    ];
+                    validation_context_sds_secret_config = caSds "ca" cfg.tls.upstream.caFile;
+                  };
+                }
+            );
+          }
+          // lib.optionalAttrs (cfg.tls.upstream.sni != null) { inherit (cfg.tls.upstream) sni; };
+        };
+      };
 
   stderrLog = fmt: {
     name = "envoy.access_loggers.stderr";
@@ -100,9 +157,12 @@ let
         }
         // lib.optionalAttrs (cfg.tls.clientCaFile != null) {
           validation_context_sds_secret_config = caSds "ca" cfg.tls.clientCaFile;
+        }
+        // lib.optionalAttrs spire.clients {
+          validation_context_sds_secret_config = spireSds "ALL";
         };
       }
-      // lib.optionalAttrs (cfg.tls.clientCaFile != null) {
+      // lib.optionalAttrs (cfg.tls.clientCaFile != null || spire.clients) {
         require_client_certificate = false;
       };
     };
@@ -380,10 +440,11 @@ in
         type = lib.types.nullOr lib.types.path;
         default = null;
         description = ''
-          Verify client certificates against this CA and forward the subject to
-          workers in `x-forwarded-client-cert`. Clients without a certificate
-          are still accepted so bearer tokens keep working. The header is
-          always overwritten, a client cannot inject one.
+          Verify client certificates against this CA and forward the subject
+          and URI SANs to workers in `x-forwarded-client-cert`. Clients
+          without a certificate are still accepted so bearer tokens keep
+          working. The header is always overwritten, a client cannot inject
+          one. See {option}`tls.spire.clients` for SVIDs.
         '';
       };
       upstream = {
@@ -409,6 +470,43 @@ in
           type = lib.types.nullOr lib.types.str;
           default = null;
           description = "SNI and name to verify on worker certificates. Unset verifies the chain only.";
+        };
+      };
+      spire = {
+        agentSocket = lib.mkOption {
+          type = lib.types.nullOr lib.types.path;
+          default = null;
+          example = "/run/spire/sockets/agent.sock";
+          description = ''
+            Workload API socket of a SPIRE agent. Envoy reads its secrets from
+            it over SDS, so they rotate without a restart. Needed by
+            {option}`spire.clients` and {option}`spire.upstream`.
+          '';
+        };
+        clients = lib.mkOption {
+          type = lib.types.bool;
+          default = false;
+          description = ''
+            Verify client certificates as X.509-SVIDs: a chain must lead to
+            the bundle of the trust domain in its SPIFFE ID, for every trust
+            domain the agent holds, federated ones included. Replaces
+            {option}`tls.clientCaFile`. The SPIFFE ID reaches the workers as
+            the URI of `x-forwarded-client-cert`, which their `spiffe://`
+            access rules match. Clients without a certificate are still
+            accepted so bearer tokens keep working.
+          '';
+        };
+        upstream = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+          example = "spiffe://example.org/farm/worker/";
+          description = ''
+            Present the agent's SVID to the workers and the scheduler, and
+            verify theirs against the trust domain's bundle: their SPIFFE ID
+            must start with this prefix. Replaces
+            {option}`tls.upstream.certFile`, `keyFile` and `caFile`; the
+            workers' `trustedProxies` then name the balancer's SPIFFE ID.
+          '';
         };
       };
     };
@@ -439,6 +537,18 @@ in
           == (cfg.tls.upstream.keyFile == null)
           && (cfg.tls.upstream.certFile == null) == (cfg.tls.upstream.caFile == null);
         message = "services.nix-grpc-farm-lb.tls.upstream.{certFile,keyFile,caFile} go together";
+      }
+      {
+        assertion = (spire.clients || spire.upstream != null) -> spire.agentSocket != null;
+        message = "services.nix-grpc-farm-lb.tls.spire.clients and upstream need tls.spire.agentSocket";
+      }
+      {
+        assertion = spire.clients -> cfg.tls.certFile != null && cfg.tls.clientCaFile == null;
+        message = "services.nix-grpc-farm-lb.tls.spire.clients requires tls.certFile and replaces tls.clientCaFile";
+      }
+      {
+        assertion = spire.upstream != null -> cfg.tls.upstream.certFile == null;
+        message = "services.nix-grpc-farm-lb.tls.spire.upstream replaces tls.upstream.{certFile,keyFile,caFile}";
       }
     ];
     # restart in one step instead of stop ... activate ... start, so a
@@ -483,7 +593,10 @@ in
                           };
                         };
                         forward_client_cert_details = "SANITIZE_SET";
-                        set_current_client_cert_details.subject = true;
+                        set_current_client_cert_details = {
+                          subject = true;
+                          uri = true;
+                        };
                         route_config.virtual_hosts = [
                           {
                             name = "farm";
@@ -505,7 +618,10 @@ in
               ];
             }
           ];
-          clusters = map workerCluster systems ++ [ schedCluster ];
+          clusters =
+            map workerCluster systems
+            ++ [ schedCluster ]
+            ++ lib.optional (spire.agentSocket != null) spireAgentCluster;
         };
       };
     };
