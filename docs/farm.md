@@ -241,7 +241,9 @@ clients are verified by the balancer. A node that such clients reach
 directly sets `tls.clientSpiffeBundlesFile` instead.
 
 The daemon re-reads its certificate files, so SVID rotation needs no
-restart. On the balancer the SDS stream delivers the new secret.
+restart. On the balancer the SDS stream delivers the new secret. A
+nix-darwin worker gets the same from a launchd job, with the files under
+`/var/lib/nix-grpc-daemon/svid`.
 
 ## Step 2: Configure the balancer
 
