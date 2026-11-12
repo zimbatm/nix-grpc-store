@@ -176,6 +176,73 @@ services.nix-grpc-daemon.oidc.providers.sso = {
 `write` lets a token holder request builds. It does not let them upload
 unsigned paths or open the worker-protocol tunnel.
 
+### Optional: identities from SPIRE
+
+A farm whose machines run a [SPIRE](https://spiffe.io) agent needs no
+private CA. Every machine has a SPIFFE ID, the agent renews the
+certificates, and withdrawing one is deleting its entry on the SPIRE
+server. The three certificates of the table above become:
+
+| Was | Becomes |
+|---|---|
+| node cert `worker-<host>` | the node's X.509-SVID, kept on disk by spiffe-helper |
+| balancer cert `lb-<host>` | envoy's X.509-SVID, read from the agent over SDS |
+| client cert `ci-<host>` | the client's X.509-SVID, or a JWT-SVID as bearer token |
+
+On each node, point the daemon at the agent and name peers by SPIFFE ID.
+`spire.agentSocket` runs `nix-grpc-daemon-svid.service`, which keeps
+`svid.pem`, `svid.key` and `bundle.pem` fresh under `spire.directory`;
+`tls.certFile`, `keyFile` and `clientCaFile` default to them. A
+`spiffe://` pattern in `accessRules` or `trustedProxies` is matched
+against the certificate's SPIFFE ID, `*` staying inside one path
+segment.
+
+```nix
+services.nix-grpc-daemon = {
+  spire.agentSocket = "/run/spire/sockets/agent.sock";
+  trustedProxies = [ "spiffe://example.org/farm/lb/*" ];
+  accessRules = [
+    { cn = "spiffe://example.org/farm/client/*"; role = "trusted"; }
+    { cn = "spiffe://example.org/farm/worker/*"; role = "trusted"; }
+    { cn = "spiffe://example.org/farm/lb/*"; role = "trusted"; }
+  ];
+};
+```
+
+The SPIRE server needs an entry per node that gives
+`nix-grpc-daemon`'s user the ID `spiffe://example.org/farm/worker/<host>`,
+one that gives envoy's user `spiffe://example.org/farm/lb/<host>`, and
+one per CI host for the user the build hook runs as.
+
+On the balancer, `tls.spire` takes the agent socket, and two switches
+that can flip independently:
+
+```nix
+services.nix-grpc-farm-lb.tls = {
+  certFile = "/var/lib/acme/farm.example.com/fullchain.pem";  # still the public certificate
+  keyFile = "/var/lib/acme/farm.example.com/key.pem";
+  spire = {
+    agentSocket = "/run/spire/sockets/agent.sock";
+    upstream = "spiffe://example.org/farm/worker/";  # envoy's SVID to the nodes, theirs verified
+    clients = true;                                  # client SVIDs in place of clientCaFile
+  };
+};
+```
+
+`upstream` replaces `tls.upstream.*`: envoy presents its SVID to the
+nodes and checks that theirs carry an ID with that prefix. `clients`
+replaces `tls.clientCaFile`: a client chain must lead to the bundle of
+the trust domain in its ID, for every trust domain the agent holds,
+federated ones included, and the ID reaches the nodes as the URI of
+`x-forwarded-client-cert`. Clients with a `ci-*` certificate from the
+old CA stop working at that moment, so move them to tokens or SVIDs
+first. Nodes only trust their own trust domain's bundle; federated
+clients are verified by the balancer. A node that such clients reach
+directly sets `tls.clientSpiffeBundlesFile` instead.
+
+The daemon re-reads its certificate files, so SVID rotation needs no
+restart. On the balancer the SDS stream delivers the new secret.
+
 ## Step 2: Configure the balancer
 
 ```nix

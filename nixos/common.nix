@@ -194,15 +194,41 @@ in
       '';
     };
 
+    spire = {
+      agentSocket = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = null;
+        example = "/run/spire/sockets/agent.sock";
+        description = ''
+          Workload API socket of a SPIRE agent. spiffe-helper keeps this
+          node's X.509-SVID, its key and the bundle of its trust domain
+          under {option}`spire.directory`, and {option}`tls.certFile`,
+          `keyFile` and `clientCaFile` default to them. Peers are then
+          named by SPIFFE ID in {option}`accessRules` and
+          {option}`trustedProxies`. The bundle covers one trust domain:
+          a node that federated clients reach directly sets
+          {option}`tls.clientSpiffeBundlesFile` instead.
+        '';
+      };
+      directory = lib.mkOption {
+        type = lib.types.path;
+        default = "/run/nix-grpc-daemon-svid";
+        description = "Where spiffe-helper writes `svid.pem`, `svid.key` and `bundle.pem`.";
+      };
+      package = lib.mkPackageOption pkgs "spiffe-helper" { };
+    };
+
     trustedProxies = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [ ];
       example = [ "lb-*" ];
       description = ''
-        CN globs of TLS-terminating balancers (see `services.nix-grpc-farm-lb.tls`).
-        A peer with such a certificate is a proxy: the client identity comes
+        TLS-terminating balancers (see `services.nix-grpc-farm-lb.tls`), as
+        CN globs or `spiffe://` patterns matched against the SPIFFE ID. A
+        peer with such a certificate is a proxy: the client identity comes
         from the `x-forwarded-client-cert` header it sets, or a forwarded
-        bearer token. Requires {option}`tls.clientCaFile`.
+        bearer token. Requires {option}`tls.clientCaFile` or
+        {option}`tls.clientSpiffeBundlesFile`.
       '';
     };
 
@@ -371,6 +397,14 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    services.nix-grpc-daemon.tls = lib.mkIf (cfg.spire.agentSocket != null) {
+      certFile = lib.mkDefault "${cfg.spire.directory}/svid.pem";
+      keyFile = lib.mkDefault "${cfg.spire.directory}/svid.key";
+      clientCaFile = lib.mkIf (cfg.tls.clientSpiffeBundlesFile == null) (
+        lib.mkDefault "${cfg.spire.directory}/bundle.pem"
+      );
+    };
+
     assertions = [
       {
         assertion = !verifiesClients || cfg.tls.certFile != null;
