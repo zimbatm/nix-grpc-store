@@ -98,6 +98,23 @@ let
     };
     workers.arm.hostPort = 50052;
   };
+  # Workers of an external farm with SVIDs from a SPIRE agent on the node; the
+  # farm CA stays named, so both roots are trusted while the farm moves.
+  valuesSpire = lib.recursiveUpdate valuesExternal {
+    tls.worker.existingSecret = "";
+    tls.worker.spire = {
+      agentSocket = "/run/spire/agent/public/api.sock";
+      niks3Token = true;
+    };
+    niks3.auth.existingSecret = "";
+    auth.trustedProxies = [ "spiffe://example.org/farm/lb/*" ];
+    auth.accessRules = [
+      {
+        cn = "spiffe://example.org/farm/client/*";
+        role = "trusted";
+      }
+    ];
+  };
   # formats.yaml emits a %YAML directive that helm rejects. JSON is YAML.
   json = pkgs.formats.json { };
   valuesFile = json.generate "values.json" values;
@@ -109,6 +126,7 @@ let
       valuesPublicCertManager
       valuesPublicSecret
       valuesExternal
+      valuesSpire
     ]
     ++ extraValues
   );
@@ -306,6 +324,31 @@ pkgs.runCommand "nix-grpc-farm-helm-check"
     helm template t chart -f ${valuesFile} --set 'upstreamCaches.urls={https://other}' --api-versions monitoring.coreos.com/v1/PodMonitor > caches.yaml
     sum() { pick Deployment t-nix-grpc-farm-worker-x86 '.spec.template.metadata.annotations."checksum/config"' "$1"; }
     test "$(sum out.yaml)" != "$(sum caches.yaml)"
+
+    # SVIDs from a SPIRE agent: the helper fetches once before the daemon and keeps
+    # renewing beside it; with a CA still named, both roots end up in one file.
+    helm template t chart -f ${json.generate "values.json" valuesSpire} --api-versions monitoring.coreos.com/v1/PodMonitor > spire.yaml
+    # yq prints an empty line per document the select skipped when an array is built after it
+    sd() { pick Deployment t-nix-grpc-farm-worker-x86 "$1" spire.yaml | grep -v '^$'; }
+    test "$(sd '[.spec.template.spec.initContainers[].name] | join(" ")')" = 'seed-store svid-init trust-init'
+    test "$(sd '[.spec.template.spec.containers[].name] | join(" ")')" = 'nix-daemon nix-grpc-daemon gc spiffe-helper trust'
+    test "$(sd '.spec.template.spec.initContainers[] | select(.name == "svid-init") | .image')" = ghcr.io/spiffe/spiffe-helper:0.12.2
+    test "$(sd '.spec.template.spec.initContainers[] | select(.name == "svid-init") | .securityContext.runAsUser')" = 990
+    sargs() { sd '.spec.template.spec.containers[] | select(.name == "nix-grpc-daemon") | .args[]'; }
+    for a in --tls-cert=/svid/svid.pem --tls-key=/svid/svid.key --client-ca=/svid/trust.pem --niks3-token-file=/svid/niks3-token \
+             --scheduler=farm.example.com:50051 '--trusted-proxy=spiffe://example.org/farm/lb/*'; do
+      sargs | grep -xF -- "$a" > /dev/null
+    done
+    test "$(sd '.spec.template.spec.volumes[] | select(.name == "spire-agent-socket") | .hostPath.path')" = /run/spire/agent/public/api.sock
+    test -z "$(sd '.spec.template.spec.volumes[] | select(.name == "niks3-token") | .name')"
+    test -z "$(sd '.spec.template.spec.volumes[] | select(.name == "tls") | .name')"
+    pick ConfigMap t-nix-grpc-farm-worker-x86-spiffe-helper '.data."helper.conf"' spire.yaml | grep -x 'jwt_svids = \[{jwt_audience = "http://niks3", jwt_svid_file_name = "niks3-token"}\]' > /dev/null
+    pick ConfigMap t-nix-grpc-farm-worker-x86-spiffe-helper '.data."helper-once.conf"' spire.yaml | grep -x 'daemon_mode = false' > /dev/null
+    # Without a CA the bundle alone is the trust, and nothing joins files.
+    helm template t chart -f ${json.generate "values.json" valuesSpire} --set tls.clientCA.existingSecret= --api-versions monitoring.coreos.com/v1/PodMonitor > spire-bundle.yaml
+    pick Deployment t-nix-grpc-farm-worker-x86 '.spec.template.spec.containers[] | select(.name == "nix-grpc-daemon") | .args[]' spire-bundle.yaml | grep -x -- --client-ca=/svid/bundle.pem > /dev/null
+    test -z "$(pick Deployment t-nix-grpc-farm-worker-x86 '.spec.template.spec.containers[] | select(.name == "trust") | .name' spire-bundle.yaml)"
+    test "$(pick Deployment t-nix-grpc-farm-worker-x86 '[.spec.template.spec.initContainers[].name] | join(" ")' spire-bundle.yaml | grep -v '^$')" = 'seed-store svid-init'
 
     touch $out
   ''

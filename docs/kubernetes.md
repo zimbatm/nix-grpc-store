@@ -287,6 +287,55 @@ tls:
                                              # SAN farm-nix-grpc-farm-scheduler-0.farm.svc, …
 ```
 
+### Identities from SPIRE
+
+Workers that join a farm outside the cluster (`scheduler.external`) can
+take their identity from a [SPIRE](https://spiffe.io) agent on the node
+instead of `tls.worker.existingSecret`:
+
+```yaml
+scheduler:
+  external: farm.example.com:50051
+tls:
+  worker:
+    spire:
+      agentSocket: /run/spire/agent/public/api.sock
+      niks3Token: true          # push with the JWT-SVID, no niks3.auth Secret
+  clientCA: {existingSecret: farm-ca}  # drop once the balancer presents an SVID
+auth:
+  trustedProxies: ["spiffe://example.org/farm/lb/*"]
+  accessRules:
+    - {cn: "spiffe://example.org/farm/client/*", role: trusted}
+```
+
+An init container fetches the X.509-SVID, its key and the trust bundle
+with spiffe-helper into a memory volume before the daemon starts, and a
+sidecar renews them; the daemon re-reads the files. With `tls.clientCA`
+still named, a small container keeps a file with that CA and the bundle,
+so a balancer that presents a farm-CA certificate stays trusted while the
+farm moves to SVIDs; without it the bundle alone is the trust. `spiffe://`
+patterns in `trustedProxies` and `accessRules` match the peer's SPIFFE ID.
+`niks3Token` writes the JWT-SVID for `niks3.serverURL` next to the
+certificate; niks3 must trust the SPIRE server's OIDC issuer for the
+pods' ID.
+
+On the SPIRE side: a SPIRE agent DaemonSet on the worker nodes with the
+`k8s_psat` node attestor (the server needs a kubeconfig for that cluster
+and its TokenReview API) and the `k8s` workload attestor, its Workload API
+socket on the `hostPath` named above, and a registration entry for the
+pods, selected by namespace and service account (the chart's, see
+`serviceAccount.name`):
+
+```
+spire-server entry create -spiffeID spiffe://example.org/farm/worker/k8s \
+  -parentID <the nodes' agent or alias ID> \
+  -selector k8s:ns:farm -selector k8s:sa:farm-nix-grpc-farm
+```
+
+The pods run the helper as the daemon's user (uid 990) in the pod's user
+namespace, so the agent's socket must be reachable from it; SPIRE creates
+it world-accessible.
+
 ### Run a standby scheduler
 
 A second scheduler on another node takes over within seconds when the
