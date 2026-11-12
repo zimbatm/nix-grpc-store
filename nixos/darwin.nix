@@ -19,6 +19,9 @@ let
     svid_file_name = "svid.pem"
     svid_key_file_name = "svid.key"
     svid_bundle_file_name = "bundle.pem"
+    # the daemon's group reads the key too: a log shipper that presents
+    # the same identity runs in it
+    key_file_mode = 0640
     daemon_mode = true
   '';
   # launchd has no ExecStartPre: the job waits for the files itself, and a
