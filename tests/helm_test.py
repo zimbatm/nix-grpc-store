@@ -359,6 +359,57 @@ def test_external_worker_advertises_the_address_of_its_node() -> None:
     assert "--advertise=$(HOST_IP):50052" in arm["args"]
 
 
+def names(boxes: list[dict[str, Any]] | None) -> list[str]:
+    return [box["name"] for box in boxes or []]
+
+
+def test_spire_helper_fetches_the_svid_before_the_daemon_and_renews_it() -> None:
+    spec = pod("spire", "worker-x86")
+    assert names(spec["initContainers"]) == ["seed-store", "svid-init", "trust-init"]
+    assert names(spec["containers"]) == [
+        "nix-daemon",
+        "nix-grpc-daemon",
+        "gc",
+        "spiffe-helper",
+        "trust",
+    ]
+    init = named(spec["initContainers"], "svid-init")
+    assert dig(init, "image") == "ghcr.io/spiffe/spiffe-helper:0.12.2"
+    assert dig(init, "securityContext", "runAsUser") == 990
+
+    args = container("spire", "worker-x86", "nix-grpc-daemon")["args"]
+    for arg in (
+        "--tls-cert=/svid/svid.pem",
+        "--tls-key=/svid/svid.key",
+        "--client-ca=/svid/trust.pem",
+        "--niks3-token-file=/svid/niks3-token",
+        "--scheduler=farm.example.com:50051",
+        "--trusted-proxy=spiffe://example.org/farm/lb/*",
+    ):
+        assert arg in args
+
+    agent = named(spec["volumes"], "spire-agent-socket")
+    assert dig(agent, "hostPath", "path") == "/run/spire/agent/public/api.sock"
+    assert named(spec["volumes"], "niks3-token") is None
+    assert named(spec["volumes"], "tls") is None
+
+    helper = pick("spire", "ConfigMap", "-worker-x86-spiffe-helper")["data"]
+    jwt = (
+        'jwt_svids = [{jwt_audience = "http://niks3",'
+        ' jwt_svid_file_name = "niks3-token"}]'
+    )
+    assert jwt in helper["helper.conf"].splitlines()
+    assert "daemon_mode = false" in helper["helper-once.conf"].splitlines()
+
+
+def test_spire_without_a_ca_trusts_the_bundle_alone() -> None:
+    spec = pod("spire-bundle", "worker-x86")
+    args = container("spire-bundle", "worker-x86", "nix-grpc-daemon")["args"]
+    assert "--client-ca=/svid/bundle.pem" in args
+    assert named(spec["containers"], "trust") is None
+    assert names(spec["initContainers"]) == ["seed-store", "svid-init"]
+
+
 def test_extra_volumes_reach_the_nix_daemon_container_only() -> None:
     for group in ("x86", "arm"):
         spec = pod("extra-volumes", f"worker-{group}")

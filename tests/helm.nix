@@ -98,6 +98,23 @@ let
     };
     workers.arm.hostPort = 50052;
   };
+  # Workers of an external farm with SVIDs from a SPIRE agent on the node; the
+  # farm CA stays named, so both roots are trusted while the farm moves.
+  valuesSpire = lib.recursiveUpdate valuesExternal {
+    tls.worker.existingSecret = "";
+    tls.worker.spire = {
+      agentSocket = "/run/spire/agent/public/api.sock";
+      niks3Token = true;
+    };
+    niks3.auth.existingSecret = "";
+    auth.trustedProxies = [ "spiffe://example.org/farm/lb/*" ];
+    auth.accessRules = [
+      {
+        cn = "spiffe://example.org/farm/client/*";
+        role = "trusted";
+      }
+    ];
+  };
   # Builders elsewhere connect to the balancer and get their builds over
   # that connection.
   valuesTunnel = lib.recursiveUpdate values { lb.tunnel.enabled = true; };
@@ -142,6 +159,12 @@ let
     public-cert-manager.values = valuesPublicCertManager;
     public-secret.values = valuesPublicSecret;
     external.values = valuesExternal;
+    spire.values = valuesSpire;
+    # Without a CA the bundle alone is the trust.
+    spire-bundle = {
+      values = valuesSpire;
+      set = "tls.clientCA.existingSecret=";
+    };
     tunnel.values = valuesTunnel;
     tunnelled.values = valuesTunnelled;
     extra-volumes.values = valuesExtraVolumes;
